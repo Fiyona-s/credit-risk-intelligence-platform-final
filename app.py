@@ -30,54 +30,37 @@ SYNTHETIC_DATA_PATH = os.path.join(settings.data_dir, "sample_applicants.csv")
 
 @st.cache_data
 def get_sample_data():
-    """The real joined+aggregated dataset, Postgres-backed real data, or the synthetic
-    fallback, in that priority order — mirrors query_runner.py's fallback chain."""
+    """The real joined+aggregated dataset, or the synthetic fallback if application_train.csv
+    is missing. Postgres is intentionally NOT a fallback here — only the chatbot
+    (src/talk_to_data/query_runner.py) uses Postgres, since that table only has the ~21
+    chatbot-facing columns, not the 166 these other pages need for full model feature parity;
+    routing every page through an extra Postgres attempt added connection overhead for a
+    degraded result. Keep this two-tier."""
     try:
         return build_joined_dataset(is_train=True)
     except FileNotFoundError:
-        pass
-    if settings.postgres_url:
-        try:
-            from src.data.loader import load_from_postgres
-            return load_from_postgres()
-        except Exception as e:
-            log.warning(f"Postgres fallback failed ({e}), using synthetic data")
-    return pd.read_csv(SYNTHETIC_DATA_PATH, comment="#")
+        return pd.read_csv(SYNTHETIC_DATA_PATH, comment="#")
 
 
 @st.cache_data
 def get_data_source_label() -> str:
-    """"real_local", "real_postgres", or "synthetic" — for accurate banners across pages."""
+    """"real_local" or "synthetic" — for accurate banners across pages (EDA, Risk Prediction,
+    Model Evaluation, Explainability, Business Rules). Deliberately does not check Postgres —
+    see get_sample_data()'s docstring."""
     if os.path.exists(os.path.join(settings.data_dir, "application_train.csv")):
         return "real_local"
-    if settings.postgres_url:
-        try:
-            from src.data.loader import load_from_postgres
-            load_from_postgres()
-            return "real_postgres"
-        except Exception:
-            pass
     return "synthetic"
 
 
 def synthetic_data_banner():
-    """Renders the appropriate banner for the current data source — a warning for synthetic,
-    a success note for the Postgres-backed real-data path, nothing for the real local CSV."""
-    source = get_data_source_label()
-    if source == "synthetic":
+    """Shows the synthetic-data warning when that's the active source; nothing otherwise."""
+    if get_data_source_label() == "synthetic":
         st.info(
-            "🧪 **Using synthetic demo data** — `application_train.csv` wasn't found in `data/` "
-            "and no working `POSTGRES_URL` is configured, so sample applicants and charts here "
-            "come from a randomly generated demo dataset (`data/sample_applicants.csv`), not the "
-            "real Kaggle dataset. Values are illustrative only."
-        )
-    elif source == "real_postgres":
-        st.success(
-            "✅ **Using real Home Credit data via a live Postgres connection.** "
-            "`application_train.csv` isn't present locally, but `POSTGRES_URL` is configured and "
-            "reachable — this table only has the chatbot-facing columns (not the full training "
-            "feature set), so Risk Prediction/Model Evaluation/Explainability run in a degraded "
-            "but real-data-backed mode rather than a synthetic one."
+            "🧪 **Using synthetic demo data** — `application_train.csv` wasn't found in `data/`, "
+            "so sample applicants and charts here come from a randomly generated demo dataset "
+            "(`data/sample_applicants.csv`), not the real Kaggle dataset. Values are illustrative "
+            "only. (The Chatbot tab may still show real data via Postgres — that fallback is "
+            "chatbot-specific.)"
         )
 
 
