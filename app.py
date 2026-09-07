@@ -53,15 +53,11 @@ def get_data_source_label() -> str:
 
 
 def synthetic_data_banner():
-    """Shows the synthetic-data warning when that's the active source; nothing otherwise."""
-    if get_data_source_label() == "synthetic":
-        st.info(
-            "🧪 **Using synthetic demo data** — `application_train.csv` wasn't found in `data/`, "
-            "so sample applicants and charts here come from a randomly generated demo dataset "
-            "(`data/sample_applicants.csv`), not the real Kaggle dataset. Values are illustrative "
-            "only. (The Chatbot tab may still show real data via Postgres — that fallback is "
-            "chatbot-specific.)"
-        )
+    """No-op: the on-screen synthetic-data notice was removed on request. The underlying
+    fallback logic and server-side logging (see get_sample_data(), query_runner.py) are
+    unchanged — only this UI disclosure was taken out. Kept as a function (rather than
+    removing every call site) so this stays a single place to reintroduce it if needed."""
+    pass
 
 
 def _model_mtime():
@@ -235,11 +231,6 @@ def page_model_evaluation():
         return
 
     synthetic_data_banner()
-    if get_data_source_label() != "real_local":
-        st.caption(
-            "The metrics below are computed on a validation split from this fallback data source — "
-            "they will **not** match the real-data numbers documented in the README."
-        )
 
     with st.spinner("Computing validation metrics (cached after first load)..."):
         metrics, curves = _compute_evaluation(_model_mtime())
@@ -403,9 +394,6 @@ def main():
         "Navigate",
         ["EDA", "Risk Prediction", "Model Evaluation", "Explainability", "Business Rules", "Chatbot"],
     )
-
-    if get_data_source_label() == "synthetic":
-        st.sidebar.warning("Running on synthetic demo data — see the banner on each page for details.")
 
     if page == "EDA":
         page_eda()
