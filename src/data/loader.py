@@ -115,6 +115,40 @@ def build_joined_dataset(is_train: bool = True, use_bureau_features: bool = True
     return base
 
 
+def load_from_postgres() -> pd.DataFrame:
+    """Pull the Postgres-hosted applicants table (loaded via scripts/load_dataset_to_postgres.py)
+    as a DataFrame, for use by app.py's get_sample_data(). Raises RuntimeError on any failure
+    (unset POSTGRES_URL, unreachable database, missing table) so callers can catch it and fall
+    through to the synthetic fallback, mirroring query_runner.py's own fallback chain.
+
+    Modeled directly on query_runner.py::_try_load_from_postgres — same attach pattern, same
+    pg_db.public.applicants table. Note this table only has the ~21 chatbot-facing columns
+    (query_runner.ALLOWED_COLUMNS), not the full 166-column joined dataset used for training —
+    enough for EDA and a richer-than-synthetic fallback elsewhere, but not full model feature
+    parity (no EXT_SOURCE_1/2/3, etc.), so Risk Prediction/Model Evaluation/Explainability run
+    in the same degraded-but-real-data-backed mode they already tolerate for the synthetic
+    fallback today, via the existing "if col not in df.columns: df[col] = None" pattern.
+    """
+    import duckdb
+
+    if not settings.postgres_url:
+        raise RuntimeError("POSTGRES_URL is not set")
+
+    escaped_url = settings.postgres_url.replace("'", "''")
+    con = duckdb.connect(database=":memory:")
+    try:
+        con.execute("INSTALL postgres")
+        con.execute("LOAD postgres")
+        con.execute(f"ATTACH '{escaped_url}' AS pg_db (TYPE postgres, READ_ONLY)")
+        df = con.execute("SELECT * FROM pg_db.public.applicants").df()
+        log.info(f"Loaded {len(df)} rows from Postgres (pg_db.public.applicants)")
+        return df
+    except Exception as e:
+        raise RuntimeError(f"Postgres load failed: {e}") from e
+    finally:
+        con.close()
+
+
 if __name__ == "__main__":
     missing = check_data_available()
     if missing:

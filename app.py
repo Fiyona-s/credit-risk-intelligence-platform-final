@@ -7,7 +7,7 @@ import seaborn as sns
 import shap
 import streamlit as st
 
-from src.data.loader import build_joined_dataset, check_data_available
+from src.data.loader import build_joined_dataset
 from src.data.preprocessor import engineer_features
 from src.ml.predict import predict_applicant, load_model
 from src.explainability.shap_explainer import compute_global_shap_values, explain_applicant
@@ -25,27 +25,57 @@ MODEL_PATH = os.path.join(settings.models_dir, "credit_risk_model.joblib")
 SYNTHETIC_DATA_PATH = os.path.join(settings.data_dir, "sample_applicants.csv")
 
 
-def using_synthetic_data() -> bool:
-    """True if the real Kaggle dataset isn't present and the app is running on synthetic demo data."""
-    return not os.path.exists(os.path.join(settings.data_dir, "application_train.csv"))
-
-
-def synthetic_data_banner():
-    st.info(
-        "🧪 **Using synthetic demo data** — `application_train.csv` wasn't found in `data/`, "
-        "so sample applicants and charts here come from a randomly generated demo dataset "
-        "(`data/sample_applicants.csv`), not the real Kaggle dataset. Values are illustrative "
-        "only. Place the real Kaggle CSVs in `data/` and restart the app for accurate results."
-    )
-
-
 @st.cache_data
 def get_sample_data():
-    """The real joined+aggregated dataset, or the synthetic fallback if application_train.csv is missing."""
+    """The real joined+aggregated dataset, Postgres-backed real data, or the synthetic
+    fallback, in that priority order — mirrors query_runner.py's fallback chain."""
     try:
         return build_joined_dataset(is_train=True)
     except FileNotFoundError:
-        return pd.read_csv(SYNTHETIC_DATA_PATH, comment="#")
+        pass
+    if settings.postgres_url:
+        try:
+            from src.data.loader import load_from_postgres
+            return load_from_postgres()
+        except Exception as e:
+            log.warning(f"Postgres fallback failed ({e}), using synthetic data")
+    return pd.read_csv(SYNTHETIC_DATA_PATH, comment="#")
+
+
+@st.cache_data
+def get_data_source_label() -> str:
+    """"real_local", "real_postgres", or "synthetic" — for accurate banners across pages."""
+    if os.path.exists(os.path.join(settings.data_dir, "application_train.csv")):
+        return "real_local"
+    if settings.postgres_url:
+        try:
+            from src.data.loader import load_from_postgres
+            load_from_postgres()
+            return "real_postgres"
+        except Exception:
+            pass
+    return "synthetic"
+
+
+def synthetic_data_banner():
+    """Renders the appropriate banner for the current data source — a warning for synthetic,
+    a success note for the Postgres-backed real-data path, nothing for the real local CSV."""
+    source = get_data_source_label()
+    if source == "synthetic":
+        st.info(
+            "🧪 **Using synthetic demo data** — `application_train.csv` wasn't found in `data/` "
+            "and no working `POSTGRES_URL` is configured, so sample applicants and charts here "
+            "come from a randomly generated demo dataset (`data/sample_applicants.csv`), not the "
+            "real Kaggle dataset. Values are illustrative only."
+        )
+    elif source == "real_postgres":
+        st.success(
+            "✅ **Using real Home Credit data via a live Postgres connection.** "
+            "`application_train.csv` isn't present locally, but `POSTGRES_URL` is configured and "
+            "reachable — this table only has the chatbot-facing columns (not the full training "
+            "feature set), so Risk Prediction/Model Evaluation/Explainability run in a degraded "
+            "but real-data-backed mode rather than a synthetic one."
+        )
 
 
 def _model_mtime():
@@ -112,10 +142,7 @@ def page_eda():
         "Key insights from `notebooks/eda.ipynb`, computed live against the data in `data/`."
     )
 
-    missing = check_data_available()
-    if missing:
-        st.error(f"Missing dataset files: {missing}. Place Kaggle CSVs in `data/`.")
-        return
+    synthetic_data_banner()
 
     df = get_sample_data()
     df = engineer_features(df)
@@ -165,8 +192,7 @@ def page_risk_prediction():
         st.warning("No trained model found. Run `python -m src.ml.train` first.")
         return
 
-    if using_synthetic_data():
-        synthetic_data_banner()
+    synthetic_data_banner()
 
     df = get_sample_data()
     use_sample = st.checkbox("Use a sample applicant from the dataset instead of manual entry", value=True)
@@ -214,10 +240,10 @@ def page_model_evaluation():
         st.warning("No trained model found. Run `python -m src.ml.train` first.")
         return
 
-    if using_synthetic_data():
-        synthetic_data_banner()
+    synthetic_data_banner()
+    if get_data_source_label() != "real_local":
         st.caption(
-            "The metrics below are computed on the synthetic demo dataset's validation split — "
+            "The metrics below are computed on a validation split from this fallback data source — "
             "they will **not** match the real-data numbers documented in the README."
         )
 
@@ -291,8 +317,7 @@ def page_explainability():
         st.warning("No trained model found. Run `python -m src.ml.train` first.")
         return
 
-    if using_synthetic_data():
-        synthetic_data_banner()
+    synthetic_data_banner()
 
     sample_size = 300
     st.caption(
@@ -315,8 +340,7 @@ def page_business_rules():
         st.warning("No trained model found. Run `python -m src.ml.train` first.")
         return
 
-    if using_synthetic_data():
-        synthetic_data_banner()
+    synthetic_data_banner()
 
     if st.button("Derive rules") or "rules" in st.session_state:
         if "rules" not in st.session_state:
@@ -384,9 +408,8 @@ def main():
         ["EDA", "Risk Prediction", "Model Evaluation", "Explainability", "Business Rules", "Chatbot"],
     )
 
-    missing = check_data_available()
-    if missing:
-        st.sidebar.error(f"Missing data files: {missing}")
+    if get_data_source_label() == "synthetic":
+        st.sidebar.warning("Running on synthetic demo data — see the banner on each page for details.")
 
     if page == "EDA":
         page_eda()
