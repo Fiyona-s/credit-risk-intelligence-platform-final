@@ -134,7 +134,13 @@ def load_from_postgres() -> pd.DataFrame:
     if not settings.postgres_url:
         raise RuntimeError("POSTGRES_URL is not set")
 
-    escaped_url = settings.postgres_url.replace("'", "''")
+    # connect_timeout is critical: without it, an unreachable-but-not-actively-refusing
+    # Postgres host can hang the connection attempt well past a platform's own request
+    # timeout, causing a full app crash (observed as Render 502 Bad Gateway) instead of
+    # falling through to the synthetic fallback like every other failure mode here does.
+    sep = "&" if "?" in settings.postgres_url else "?"
+    timed_url = f"{settings.postgres_url}{sep}connect_timeout=5"
+    escaped_url = timed_url.replace("'", "''")
     con = duckdb.connect(database=":memory:")
     try:
         con.execute("INSTALL postgres")

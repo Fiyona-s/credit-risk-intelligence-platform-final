@@ -77,7 +77,16 @@ def _try_load_from_postgres(con: duckdb.DuckDBPyConnection) -> bool:
     # Standard SQL string-literal escaping (DuckDB's ATTACH doesn't support parameter
     # binding for the connection string — confirmed: it's parsed as a literal, not an
     # expression position).
-    escaped_url = settings.postgres_url.replace("'", "''")
+    #
+    # connect_timeout is critical here: without it, an unreachable-but-not-actively-refusing
+    # Postgres host (e.g. a suspended/expired database that accepts TCP but never completes
+    # the handshake) can hang the connection attempt for the OS-level TCP timeout (60s+),
+    # which blocks the whole Streamlit render and gets killed by the platform's own request
+    # timeout (observed in production as a 502 Bad Gateway) instead of falling through to the
+    # synthetic fallback like every other failure mode here already does.
+    sep = "&" if "?" in settings.postgres_url else "?"
+    timed_url = f"{settings.postgres_url}{sep}connect_timeout=5"
+    escaped_url = timed_url.replace("'", "''")
 
     try:
         con.execute("INSTALL postgres")
