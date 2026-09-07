@@ -1,19 +1,22 @@
 """Streamlit multi-page app: EDA, Risk Prediction, Model Evaluation, Explainability, Business Rules, Chatbot."""
 import os
 
-import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
-import shap
 import streamlit as st
 
 from src.data.loader import build_joined_dataset
 from src.data.preprocessor import engineer_features
 from src.ml.predict import predict_applicant, load_model
-from src.explainability.shap_explainer import compute_global_shap_values, explain_applicant
 from src.rules.rule_derivation import derive_rules
 from src.utils.config import settings
 from src.utils.logger import get_logger
+
+# matplotlib/seaborn/shap (and src.explainability.shap_explainer, which imports shap
+# at its own module level) are imported lazily inside the Model Evaluation and
+# Explainability pages (and their cached helpers) rather than at module level here —
+# they're heavy (each pulls in its own C/Fortran extensions) and a session that
+# never visits those two tabs shouldn't pay their import memory cost. This
+# matters on memory-constrained deployments (e.g. Render's free tier, 512MB).
 
 log = get_logger(__name__)
 
@@ -126,6 +129,11 @@ def _get_global_shap_figure(model_mtime, sample_size: int):
     Figure, not something that needs to round-trip through pickling. Cached on
     (model_mtime, sample_size) so a retrain or a different sample size recomputes it.
     """
+    import matplotlib.pyplot as plt
+    import shap
+
+    from src.explainability.shap_explainer import compute_global_shap_values
+
     df = get_sample_data()
     shap_values, X_transformed, feature_names = compute_global_shap_values(df, max_rows=sample_size)
 
@@ -229,6 +237,9 @@ def page_risk_prediction():
 
 
 def page_model_evaluation():
+    import matplotlib.pyplot as plt
+    import seaborn as sns
+
     st.header("Model Evaluation")
     st.markdown(
         "Live validation metrics for the trained model — reconstructs the same stratified "
@@ -299,6 +310,8 @@ def page_model_evaluation():
 
 
 def page_explainability():
+    from src.explainability.shap_explainer import explain_applicant
+
     st.header("Explainability (SHAP)")
 
     st.subheader("This applicant's explanation")

@@ -100,22 +100,30 @@ def _try_load_from_postgres(con: duckdb.DuckDBPyConnection) -> bool:
         con.execute("LOAD postgres")
         con.execute(f"ATTACH '{escaped_url}' AS pg_db (TYPE postgres, READ_ONLY)")
 
+    # NOT a `with ThreadPoolExecutor() as pool:` block: that context manager calls
+    # shutdown(wait=True) on exit unconditionally, which would block waiting for the
+    # hung worker thread anyway — silently defeating the whole point of this timeout.
+    # shutdown(wait=False) lets this function return immediately on timeout; the
+    # abandoned thread keeps running (and leaking its socket/connection) in the background.
     timeout_seconds = 8
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     try:
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(_attach).result(timeout=timeout_seconds)
+        pool.submit(_attach).result(timeout=timeout_seconds)
     except concurrent.futures.TimeoutError:
+        pool.shutdown(wait=False)
         log.warning(
             f"POSTGRES_URL is set but connecting timed out after {timeout_seconds}s (hard "
             "wall-clock limit) — falling back to synthetic demo data."
         )
         return False
     except Exception as e:
+        pool.shutdown(wait=False)
         log.warning(
             f"POSTGRES_URL is set but connecting failed ({e}) — falling back to synthetic "
             "demo data. Check the connection string and that Postgres is reachable."
         )
         return False
+    pool.shutdown(wait=False)
 
     try:
         # Prefer a view: queries hit Postgres live, nothing duplicated into DuckDB's memory.

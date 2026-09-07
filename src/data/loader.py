@@ -158,19 +158,27 @@ def load_from_postgres() -> pd.DataFrame:
         finally:
             con.close()
 
+    # NOT a `with ThreadPoolExecutor() as pool:` block: that context manager calls
+    # shutdown(wait=True) on exit unconditionally, which would block waiting for the
+    # hung worker thread anyway — silently defeating the whole point of this timeout.
+    # shutdown(wait=False) here lets this function return immediately; the abandoned
+    # thread keeps running (and leaking its socket/connection) in the background.
     timeout_seconds = 8
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(_attempt)
-        try:
-            df = future.result(timeout=timeout_seconds)
-        except concurrent.futures.TimeoutError as e:
-            raise RuntimeError(
-                f"Postgres load timed out after {timeout_seconds}s (hard wall-clock limit, "
-                "connect_timeout alone wasn't enough on this network path)"
-            ) from e
-        except Exception as e:
-            raise RuntimeError(f"Postgres load failed: {e}") from e
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = pool.submit(_attempt)
+    try:
+        df = future.result(timeout=timeout_seconds)
+    except concurrent.futures.TimeoutError as e:
+        pool.shutdown(wait=False)
+        raise RuntimeError(
+            f"Postgres load timed out after {timeout_seconds}s (hard wall-clock limit, "
+            "connect_timeout alone wasn't enough on this network path)"
+        ) from e
+    except Exception as e:
+        pool.shutdown(wait=False)
+        raise RuntimeError(f"Postgres load failed: {e}") from e
 
+    pool.shutdown(wait=False)
     log.info(f"Loaded {len(df)} rows from Postgres (pg_db.public.applicants)")
     return df
 
