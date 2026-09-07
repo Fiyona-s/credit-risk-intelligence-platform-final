@@ -1,0 +1,27 @@
+# Real Kaggle dataset - never commit any of these
+data/application_train.csv
+data/application_test.csv
+data/bureau.csv
+data/bureau_balance.csv
+data/credit_card_balance.csv
+data/installments_payments.csv
+data/previous_application.csv
+data/POS_CASH_balance.csv
+data/*.zip
+
+# keep the synthetic fallback used by the deployed chatbot demo
+!data/sample_applicants.csv
+
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/
+venv/
+*.egg-info/
+
+# OS
+.DS_Store

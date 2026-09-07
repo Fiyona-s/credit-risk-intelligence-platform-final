@@ -1,0 +1,17 @@
+pandas==2.2.2
+numpy==1.26.4
+scikit-learn==1.5.1
+lightgbm==4.5.0
+imbalanced-learn==0.12.3
+shap==0.46.0
+duckdb==1.0.0
+sqlparse==0.5.1
+streamlit==1.37.1
+plotly==5.23.0
+matplotlib==3.9.1
+seaborn==0.13.2
+python-dotenv==1.0.1
+groq==1.0.0
+google-generativeai==0.7.2
+joblib==1.4.2
+jupyter==1.0.0
