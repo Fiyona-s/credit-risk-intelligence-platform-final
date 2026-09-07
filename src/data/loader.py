@@ -129,30 +129,50 @@ def load_from_postgres() -> pd.DataFrame:
     in the same degraded-but-real-data-backed mode they already tolerate for the synthetic
     fallback today, via the existing "if col not in df.columns: df[col] = None" pattern.
     """
+    import concurrent.futures
     import duckdb
 
     if not settings.postgres_url:
         raise RuntimeError("POSTGRES_URL is not set")
 
-    # connect_timeout is critical: without it, an unreachable-but-not-actively-refusing
-    # Postgres host can hang the connection attempt well past a platform's own request
-    # timeout, causing a full app crash (observed as Render 502 Bad Gateway) instead of
-    # falling through to the synthetic fallback like every other failure mode here does.
+    # connect_timeout is passed through too, but is NOT sufficient on its own — observed in
+    # production (Render) that DuckDB's postgres extension can still hang past it on some
+    # network paths (e.g. a host that accepts TCP but the extension's own connect/handshake
+    # logic doesn't honor connect_timeout the way libpq's CLI does). The hard wall-clock
+    # timeout below via a background thread is the real guarantee: if the attempt hasn't
+    # returned within timeout_seconds, we give up and move on regardless of what the
+    # underlying (possibly still-blocked) network call eventually does. The abandoned
+    # thread may leak in the background until the call finally errors or the process
+    # restarts — an acceptable tradeoff against hanging every page load indefinitely.
     sep = "&" if "?" in settings.postgres_url else "?"
     timed_url = f"{settings.postgres_url}{sep}connect_timeout=5"
     escaped_url = timed_url.replace("'", "''")
-    con = duckdb.connect(database=":memory:")
-    try:
-        con.execute("INSTALL postgres")
-        con.execute("LOAD postgres")
-        con.execute(f"ATTACH '{escaped_url}' AS pg_db (TYPE postgres, READ_ONLY)")
-        df = con.execute("SELECT * FROM pg_db.public.applicants").df()
-        log.info(f"Loaded {len(df)} rows from Postgres (pg_db.public.applicants)")
-        return df
-    except Exception as e:
-        raise RuntimeError(f"Postgres load failed: {e}") from e
-    finally:
-        con.close()
+
+    def _attempt() -> pd.DataFrame:
+        con = duckdb.connect(database=":memory:")
+        try:
+            con.execute("INSTALL postgres")
+            con.execute("LOAD postgres")
+            con.execute(f"ATTACH '{escaped_url}' AS pg_db (TYPE postgres, READ_ONLY)")
+            return con.execute("SELECT * FROM pg_db.public.applicants").df()
+        finally:
+            con.close()
+
+    timeout_seconds = 8
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(_attempt)
+        try:
+            df = future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError as e:
+            raise RuntimeError(
+                f"Postgres load timed out after {timeout_seconds}s (hard wall-clock limit, "
+                "connect_timeout alone wasn't enough on this network path)"
+            ) from e
+        except Exception as e:
+            raise RuntimeError(f"Postgres load failed: {e}") from e
+
+    log.info(f"Loaded {len(df)} rows from Postgres (pg_db.public.applicants)")
+    return df
 
 
 if __name__ == "__main__":

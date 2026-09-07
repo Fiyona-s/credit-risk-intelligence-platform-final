@@ -88,10 +88,28 @@ def _try_load_from_postgres(con: duckdb.DuckDBPyConnection) -> bool:
     timed_url = f"{settings.postgres_url}{sep}connect_timeout=5"
     escaped_url = timed_url.replace("'", "''")
 
-    try:
+    # connect_timeout alone was NOT sufficient in production (Render): DuckDB's postgres
+    # extension can still hang past it on some network paths. A background thread with a
+    # hard wall-clock timeout is the real guarantee — if the attempt hasn't returned within
+    # timeout_seconds, we give up and fall through regardless of what the underlying
+    # (possibly still-blocked) network call eventually does.
+    import concurrent.futures
+
+    def _attach():
         con.execute("INSTALL postgres")
         con.execute("LOAD postgres")
         con.execute(f"ATTACH '{escaped_url}' AS pg_db (TYPE postgres, READ_ONLY)")
+
+    timeout_seconds = 8
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(_attach).result(timeout=timeout_seconds)
+    except concurrent.futures.TimeoutError:
+        log.warning(
+            f"POSTGRES_URL is set but connecting timed out after {timeout_seconds}s (hard "
+            "wall-clock limit) — falling back to synthetic demo data."
+        )
+        return False
     except Exception as e:
         log.warning(
             f"POSTGRES_URL is set but connecting failed ({e}) — falling back to synthetic "
