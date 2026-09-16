@@ -21,9 +21,16 @@ from src.utils.logger import get_logger
 log = get_logger(__name__)
 
 
-def evaluate_model(pipeline, X_val, y_val, threshold: float = 0.5) -> dict:
-    y_proba = pipeline.predict_proba(X_val)[:, 1]
-    y_pred = (y_proba >= threshold).astype(int)
+def compute_metrics_from_proba(y_val, y_proba, threshold: float = 0.5) -> dict:
+    """The actual metric computation behind evaluate_model(), factored out so a
+    caller that already has predicted probabilities (e.g. src.ml.model_comparison,
+    which fits Logistic Regression/XGBoost/LightGBM directly rather than through a
+    Pipeline object) can compute the exact same metrics without needing to wrap its
+    model in a Pipeline just to satisfy evaluate_model()'s `pipeline.predict_proba(X)`
+    calling convention. evaluate_model() below is unchanged in behavior — it still
+    takes a pipeline/X_val, calls predict_proba itself, and delegates here.
+    """
+    y_pred = (np.asarray(y_proba) >= threshold).astype(int)
 
     roc_auc = roc_auc_score(y_val, y_proba)
     pr_auc = average_precision_score(y_val, y_proba)
@@ -31,13 +38,6 @@ def evaluate_model(pipeline, X_val, y_val, threshold: float = 0.5) -> dict:
     recall = recall_score(y_val, y_pred, zero_division=0)
     f1 = f1_score(y_val, y_pred, zero_division=0)
     cm = confusion_matrix(y_val, y_pred)
-
-    log.info(f"ROC-AUC: {roc_auc:.4f}")
-    log.info(f"PR-AUC (average precision): {pr_auc:.4f}")
-    log.info(f"Precision @ {threshold}: {precision:.4f}")
-    log.info(f"Recall @ {threshold}: {recall:.4f}")
-    log.info(f"F1 @ {threshold}: {f1:.4f}")
-    log.info(f"Confusion matrix (rows=actual, cols=predicted):\n{cm}")
 
     return {
         "roc_auc": roc_auc,
@@ -48,6 +48,20 @@ def evaluate_model(pipeline, X_val, y_val, threshold: float = 0.5) -> dict:
         "confusion_matrix": cm,
         "threshold": threshold,
     }
+
+
+def evaluate_model(pipeline, X_val, y_val, threshold: float = 0.5) -> dict:
+    y_proba = pipeline.predict_proba(X_val)[:, 1]
+    metrics = compute_metrics_from_proba(y_val, y_proba, threshold)
+
+    log.info(f"ROC-AUC: {metrics['roc_auc']:.4f}")
+    log.info(f"PR-AUC (average precision): {metrics['pr_auc']:.4f}")
+    log.info(f"Precision @ {threshold}: {metrics['precision']:.4f}")
+    log.info(f"Recall @ {threshold}: {metrics['recall']:.4f}")
+    log.info(f"F1 @ {threshold}: {metrics['f1']:.4f}")
+    log.info(f"Confusion matrix (rows=actual, cols=predicted):\n{metrics['confusion_matrix']}")
+
+    return metrics
 
 
 def compute_roc_pr_curves(pipeline, X_val, y_val) -> dict:
@@ -83,7 +97,7 @@ def print_model_comparison(lightgbm_metrics: dict, baseline_metrics: dict) -> No
     log.info(f"{'Logistic Regression (base)':<28s} {baseline_metrics['roc_auc']:>10.4f} {baseline_metrics['pr_auc']:>10.4f}")
 
 
-def top_feature_importances(pipeline, numeric_cols, top_n: int = 20) -> list:
+def top_feature_importances(pipeline, numeric_cols, categorical_cols=None, top_n: int = 20) -> list:
     """Return the top_n (feature_name, importance) pairs from the trained LightGBM model.
 
     Uses LightGBM's built-in gain-based importance rather than recomputing SHAP here
@@ -94,7 +108,7 @@ def top_feature_importances(pipeline, numeric_cols, top_n: int = 20) -> list:
 
     model = pipeline.named_steps["model"]
     preprocessor = pipeline.named_steps["preprocessor"]
-    feature_names = get_output_feature_names(preprocessor, numeric_cols)
+    feature_names = get_output_feature_names(preprocessor, numeric_cols, categorical_cols)
     importances = model.feature_importances_
 
     pairs = sorted(zip(feature_names, importances), key=lambda p: p[1], reverse=True)[:top_n]
