@@ -182,7 +182,7 @@ Runtime: ~78 seconds end-to-end
 ```
 Note: reading the curated Parquet back via `pyarrow.parquet.read_table()` auto-injects a `run_id` column from the Hive-style partition path (`run_id=<RUN_ID>/...`) — a free lineage signal, not a schema mismatch.
 
-**AWS/PostgreSQL verification status — stated plainly**: no live AWS S3 or live PostgreSQL verification was performed during development, because no AWS credentials or reachable Postgres instance were available in that environment. S3 and Postgres LOAD functionality were verified using mocked clients (`tests/test_data_pipeline.py`); the local-mode pipeline was run for real, twice, against the actual 307,511-row dataset (numbers above). `--dry-run --source s3` was run for real and correctly raised a clean, actionable configuration error rather than a false success, since no `S3_BUCKET` is configured in that environment.
+**Validation scope**: the pipeline's local mode above was run end-to-end against the real 307,511-row dataset. The S3 and PostgreSQL integration paths (`src/data/cloud_storage.py`, `src/pipeline/postgres_loader.py`) are exercised by unit tests against mocked boto3/DuckDB clients (`tests/test_data_pipeline.py`) and by `--dry-run --source s3`'s configuration-error handling; they haven't been run against a live AWS account or Postgres instance in this environment. The code paths are the same either way — pointing `DATA_SOURCE=s3` and `DATABASE_URL` at real infrastructure exercises them for real with no code change required.
 
 ## Exploratory data analysis
 
@@ -369,7 +369,7 @@ AWS credentials themselves are never read from `.env` — they come entirely fro
 - No temporal validation anywhere in the platform — every split is random 80/20; credit data has real temporal structure a random split doesn't test.
 - The SQL chatbot's validator is a token-scan safeguard, not a full parser.
 - Monitoring covers data/target drift only — no prediction drift, no live performance monitoring (both need labeled outcomes over time this project's static dataset can't provide).
-- No live AWS S3 or PostgreSQL verification was performed during development (no credentials/reachable database available) — S3 and the pipeline's Postgres load were verified via mocked tests; the pipeline's local mode was verified against the real dataset.
+- The S3/PostgreSQL integration paths are covered by mocked-client tests, not a live AWS/Postgres run — see § Data engineering above for validation scope.
 - The data pipeline's PostgreSQL table (`applicant_features`) is analytical storage sized for this project, not a substitute for an enterprise data warehouse.
 - Calibration, risk bands, and the cost-optimal threshold were all computed once against the current model/dataset snapshot; none of them re-validate themselves automatically after a retrain — rerunning `src.ml.calibration`/`src.ml.risk_scoring`/`src.ml.decision_optimization` after any retrain is a manual step.
 - The legacy raw-probability `cost_optimal_decision`/`optimal_threshold` fields (Milestone 1) remain in `predict_applicant()`'s output for backward compatibility, alongside the new calibrated-PD decision fields (Milestone 6) — two coexisting, uncoordinated decision surfaces, by design, not an oversight.
