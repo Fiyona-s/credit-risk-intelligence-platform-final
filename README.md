@@ -257,7 +257,7 @@ risk_score = round(clip(calibrated_pd, 0, 1) × 1000)   — bounded 0-1000, deli
 
 Monotonicity confirmed directly (mean PD and observed default rate both strictly increase across bands). **These are project-defined categories for this project, evaluated on one validation snapshot — not official banking, FICO, or credit-bureau risk grades.**
 
-**A large, honestly-reported shift from the old (pre-calibration) bands**: the previous system used fixed raw-probability thresholds (`RISK_THRESHOLD_LOW=0.10`, `RISK_THRESHOLD_MEDIUM=0.30`, three bands: Low/Medium/High). Because raw probabilities were severely inflated population-wide, 90.6% of applicants previously labeled "Medium" or part of "High" are now correctly recognized as "Low" risk under calibrated PD. Ranking (ROC-AUC/PR-AUC) is unchanged by calibration — this is a scale correction, not a change in the model's underlying risk assessment.
+**A large, honestly-reported shift from the old (pre-calibration) bands**: the previous system used fixed raw-probability thresholds (`RISK_THRESHOLD_LOW=0.10`, `RISK_THRESHOLD_MEDIUM=0.30`, three bands: Low/Medium/High). Because raw probabilities were inflated population-wide, 90.6% of applicants previously labeled "Medium" or part of "High" fall into the "Low" band under calibrated PD. Ranking (ROC-AUC/PR-AUC) is unchanged by calibration — this is a scale correction, not a change in the model's underlying risk assessment.
 
 ## Cost-sensitive decision optimization
 
