@@ -43,7 +43,7 @@ def derive_rules(X_sample: pd.DataFrame, max_depth: int = 4, sample_size: int = 
     model_predictions = model.predict(X_transformed)
 
     from src.data.preprocessor import get_output_feature_names
-    feature_names = get_output_feature_names(preprocessor, numeric_cols)
+    feature_names = get_output_feature_names(preprocessor, numeric_cols, categorical_cols)
 
     surrogate = DecisionTreeClassifier(max_depth=max_depth, random_state=42, class_weight="balanced")
     surrogate.fit(X_transformed, model_predictions)

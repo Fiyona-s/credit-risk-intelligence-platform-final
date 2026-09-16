@@ -1,103 +1,104 @@
 # Credit Risk Intelligence Platform
 
+An end-to-end, explainable and auditable credit-risk decision-support platform: batch data engineering on cloud object storage, imbalance-aware gradient boosting, probability calibration, cost-sensitive decision optimization, applicant-level SHAP explanations, fairness auditing, natural-language portfolio analytics, and model/data monitoring — built on the Kaggle Home Credit Default Risk dataset.
+
+> **This is a technical credit-risk decision-support platform built for a learning/portfolio project. It is not an actual lender approval system, and none of its risk bands, thresholds, or decisions represent real banking or regulatory policy.**
+
 ## Why this exists
 
-A bank that only outputs a probability of default from a black-box model creates two problems: credit analysts can't defend a rejection to a regulator or a customer, and the risk team can't audit whether the model is picking up on sensible signals or spurious correlations. This platform pairs a LightGBM default-risk model with **per-applicant SHAP explanations**, **plain-English business rules** distilled from the model, and a **talk-to-data chatbot** so risk analysts can interrogate the applicant portfolio in natural language without writing SQL — turning a prediction into something a credit policy team can actually act on and defend.
+A model that only outputs a probability of default from a black box creates two problems: credit analysts can't defend a decision to a regulator or a customer, and the risk team can't audit whether the model is tracking sensible signals or spurious correlations, whether its probabilities are actually reliable, or whether it treats applicant groups equitably. This platform pairs a calibrated LightGBM default-risk model with **per-applicant SHAP explanations**, **cost-sensitive decision optimization**, a **fairness audit**, **drift monitoring**, and a **talk-to-data chatbot** — turning a raw prediction into something a credit policy team could actually inspect, question, and defend, backed by a small but genuine batch data-engineering layer (S3 → validation → curated Parquet → PostgreSQL) rather than a notebook wrapped in a UI.
+
+## Key capabilities
+
+**Data Engineering**
+Batch ingestion · schema/data-quality validation (reused across the whole platform, not duplicated) · ETL onto the existing feature-engineering pipeline · S3 raw/curated/metadata zones · curated Parquet · PostgreSQL analytical table · deterministic Python orchestration · run-ID lineage · idempotent full-refresh loads · bounded retry on transient cloud/DB failures
+
+**Machine Learning**
+Logistic Regression / XGBoost / LightGBM comparison (LightGBM deployed) · bureau/previous-application/POS/credit-card/installment feature engineering with a feature registry · automated leakage/data validation · class-imbalance handling · monotonic constraints · sigmoid probability calibration · calibrated risk scoring and project-defined risk bands · cost-sensitive decision optimization
+
+**Explainability / Responsible AI**
+Applicant-level TreeSHAP explanations (raw-model-margin scale, with business-readable feature-registry meanings) · fairness audit (demographic parity / equal opportunity) · Evidently-based drift monitoring · an auto-generated model card PDF
+
+**Application**
+FastAPI REST endpoint · Streamlit multi-tab UI · natural-language-to-SQL chatbot on DuckDB · Docker / Docker Compose · pytest test suite (145 tests as of the last full run — see § Testing)
 
 ## Architecture
 
+```mermaid
+flowchart TD
+    S3[AWS S3<br/>raw / curated / metadata zones<br/>optional — DATA_SOURCE=s3]
+    RAW[data/*.csv<br/>Home Credit application + 6 auxiliary tables]
+    INGEST[Batch Ingestion<br/>src/pipeline/ingest.py]
+    VALIDATE[Data Validation<br/>src/data/validation.py — reused everywhere]
+    ETL[ETL / Feature Engineering<br/>src/data/loader.py + src/data/preprocessor.py<br/>SAME functions used by training, inference, and the pipeline]
+    CURATED[Curated Parquet<br/>curated_data/applicant_features/run_id=.../part-000.parquet]
+    PG[(PostgreSQL<br/>applicant_features table — optional, DATABASE_URL)]
+    LGBM[LightGBM<br/>scale_pos_weight + monotonic constraints]
+    RAWP[Raw Probability]
+    SHAP[SHAP Explanation<br/>raw model margin]
+    CAL[Sigmoid Calibration]
+    CPD[Calibrated PD]
+    RISK[Risk Scoring<br/>Low / Moderate / High / Very High]
+    DECOPT[Cost-Sensitive Decision Optimization]
+    DECISION[Approve / Decline]
+    APIUI[FastAPI + Streamlit]
+
+    S3 -.optional.-> RAW
+    RAW --> INGEST --> VALIDATE --> ETL --> CURATED --> PG
+    ETL --> LGBM
+    LGBM --> RAWP
+    RAWP --> SHAP
+    RAWP --> CAL --> CPD
+    CPD --> RISK
+    CPD --> DECOPT --> DECISION
+    RISK --> APIUI
+    DECISION --> APIUI
+    SHAP --> APIUI
+    PG -.analytics only, not read by ML pipeline.-> APIUI
 ```
-                        ┌─────────────────────────┐
-                        │   Kaggle Home Credit     │
-                        │   CSVs (data/)           │
-                        │  application, bureau,    │
-                        │  bureau_balance,         │
-                        │  previous_application,   │
-                        │  POS_CASH_balance,       │
-                        │  credit_card_balance,    │
-                        │  installments_payments   │
-                        └────────────┬─────────────┘
-                                     │
-                              src/data/loader.py
-                          (load raw application +
-                           six auxiliary tables)
-                                     │
-                    src/data/preprocessor.py
-              build_aggregate_features(df)
-        (bureau/prev-app/POS/credit-card/installments ->
-         one row per SK_ID_CURR, left-joined onto df;
-         shared by train.py, predict.py, shap_explainer.py
-         so train-time and inference-time features match exactly)
-                                     │
-                     ┌───────────────┼───────────────────┐
-                     ▼               ▼                   ▼
-        src/data/preprocessor.py   DuckDB table      notebooks/eda.ipynb
-        (clean/impute/encode/      ("applicants")     (EDA + business
-         engineer ratios)                ▲             insights)
-                     │                   │
-                     │      ┌────────────┴────────────┐
-                     │      │  query_runner.py tries,  │
-                     │      │  in order:               │
-                     │      │  1. real join above      │
-                     │      │  2. POSTGRES_URL, if set:│
-                     │      │     DuckDB ATTACHes a    │
-                     │      │     Postgres db live     │
-                     │      │     (pre-loaded, once,   │
-                     │      │     by scripts/load_     │
-                     │      │     dataset_to_postgres  │
-                     │      │     .py — deployment     │
-                     │      │     only, optional)      │
-                     │      │  3. data/sample_         │
-                     │      │     applicants.csv       │
-                     │      │     (committed,          │
-                     │      │     SYNTHETIC — from     │
-                     │      │     scripts/generate_    │
-                     │      │     synthetic_data.py)   │
-                     │      │  Any failure at step 2   │
-                     │      │  falls through to step 3.│
-                     │      └────────────┬────────────┘
-                     │                   │
-                     ▼                   ▼
-             src/ml/train.py      src/talk_to_data/
-        (LightGBM + scale_pos_    nl_to_sql.py + query_runner.py
-         weight + monotonic         (NL -> SQL via Groq/Gemini,
-         constraints on income/     few-shot examples + schema +
-         EXT_SOURCE_*, saved to     rules in the prompt; validated,
-         models/*.joblib.           executed on DuckDB; app.py shows
-         --baseline/--cv/--tune     a banner when running on
-         are opt-in reporting-      synthetic data)
-         only side paths, never
-         change the saved model)
-                     │
-        ┌────────────┼─────────────┐
-        ▼            ▼             ▼
-  src/ml/predict.py  src/explainability/  src/rules/
-  (risk score +       shap_explainer.py    rule_derivation.py
-   band)              (per-prediction      (surrogate decision
-                       SHAP explanation)    tree -> if/then rules)
-        │            │             │
-        └────────────┴─────────────┘
-                     ▼
-              app.py (Streamlit)
-   EDA | Risk Prediction | Model Evaluation |
-   Explainability | Business Rules | Chatbot
-  (Model Evaluation: live ROC/PR curves + confusion
-   matrix heatmap, reconstructing train.py's split.
-   Explainability: per-applicant SHAP + a global
-   SHAP summary/beeswarm plot across sampled rows.)
-                     │
-                     ▼
-           Docker + docker-compose
-    (single container; runs locally via
-     `docker-compose up`, or deployed as a
-     web service on Render — same image
-     either way, POSTGRES_URL is the only
-     deployment-specific config)
+
+**Two independent decision surfaces, deliberately not merged**: `calibrated PD → risk score/band` describes the model's assessed risk level; `calibrated PD → cost-sensitive threshold → Approve/Decline` is a separate, configurable business-policy layer. A "Very High" risk band does not automatically mean "Decline" — the mapping from PD to a decision is entirely parameterized by `FP_COST`/`FN_COST`, never hardcoded. See § Risk scoring and § Cost-sensitive decision optimization below.
+
+**Data pipeline vs. ML pipeline**: the data pipeline (`src/pipeline/pipeline.py`) does not sit "in front of" model training/inference — both are independent consumers of the same `src.data.loader.build_joined_dataset()` / `src.data.preprocessor.engineer_features()` functions. Training and prediction always re-derive features fresh from the raw CSVs; they never read the curated Parquet/Postgres output. This means there is no version-skew risk between "what the pipeline curated for analytics" and "what the model was actually trained/predicted on" — the curated table is a lineage/analytics artifact, not a dependency of the model.
+
+## Project structure
+
+```
+src/
+├── data/            loader, preprocessor (feature engineering), feature_registry,
+│                    validation (leakage/quality checks), cloud_storage (S3)
+├── ml/              train, evaluate, predict, calibration, risk_scoring,
+│                    decision_optimization, model_comparison
+├── explainability/  shap_explainer (applicant-level SHAP)
+├── fairness/        audit (demographic parity / equal opportunity)
+├── monitoring/       drift_report (Evidently data/target drift)
+├── rules/           rule_derivation (surrogate decision-tree rules)
+├── pipeline/        ingest, curate, postgres_loader, metadata, pipeline (orchestrator)
+├── talk_to_data/    nl_to_sql, query_runner, prompt_templates (chatbot)
+└── utils/           config, helpers, logger
+
+tests/               pytest suite — feature engineering, validation, model
+                     comparison, calibration, risk scoring, decision
+                     optimization, SHAP, data pipeline
+reports/             generated artifacts (model comparison, calibration,
+                     risk scoring, decision optimization, SHAP, data
+                     engineering, data validation reports)
+models/              credit_risk_model.joblib (committed), plus run-generated
+                     optimal_threshold.json / probability_calibrator.joblib /
+                     decision_threshold.json / calibration_metadata.json
+scripts/             generate_synthetic_data, load_dataset_to_postgres,
+                     generate_model_card
+
+app.py               Streamlit UI (10 tabs — see § Streamlit below)
+api.py               FastAPI REST endpoint
+docker-compose.yml   single-container app (Streamlit + FastAPI via supervisord)
+requirements.txt
+.env.example         placeholder configuration — see § Configuration
 ```
 
 ## Setup & run
 
-The minimum path to a fully working app needs **no Kaggle dataset and no local Python install**:
+The minimum path to a fully working app needs **no Kaggle dataset, no AWS account, and no local Python install**:
 
 1. `cp .env.example .env` and fill in `GROQ_API_KEY` (recommended, free tier at [console.groq.com](https://console.groq.com)) or `GEMINI_API_KEY` as a fallback.
 2. ```
@@ -105,35 +106,83 @@ The minimum path to a fully working app needs **no Kaggle dataset and no local P
    ```
 3. Open http://localhost:8501.
 
-That's it. **EDA, Risk Prediction, Model Evaluation, Explainability, and Business Rules** all work immediately — they run off the pretrained model artifact already committed at `models/credit_risk_model.joblib`, no training step needed. **Chatbot** works immediately too: if `data/application_train.csv` isn't present, `src/talk_to_data/query_runner.py` automatically falls back to a small synthetic demo dataset (`data/sample_applicants.csv`, generated by `scripts/generate_synthetic_data.py`, committed to the repo) and the Chatbot tab shows a clear on-screen banner saying so — the numbers are illustrative, not real Kaggle statistics, but the interface and query patterns are fully demonstrable without downloading anything.
-
-No paid services, no credit card, required anywhere in the stack.
+**EDA, Risk Prediction, Model Evaluation, Explainability, Business Rules, Fairness Audit, and Monitoring** all work immediately off the pretrained model artifact already committed at `models/credit_risk_model.joblib` — no training step needed. **Chatbot** works immediately too: if `data/application_train.csv` isn't present, `src/talk_to_data/query_runner.py` falls back to a small synthetic demo dataset (`data/sample_applicants.csv`, committed) with no on-screen indication of the substitution (removed by explicit request during development — see git history if this matters for your use of the platform). No paid services or credit card required anywhere in the stack. Cloud (S3/PostgreSQL) configuration is entirely optional and unrelated to the app's own startup — see § Data engineering below.
 
 ### Using the real dataset / retraining (optional)
 
-To train on the real data and get accurate chatbot answers instead of the synthetic fallback:
-
-1. Download the [Home Credit Default Risk dataset](https://www.kaggle.com/c/home-credit-default-risk/data) from Kaggle and place the CSVs in `data/` (at minimum `application_train.csv`, `application_test.csv`; also `bureau.csv`, `bureau_balance.csv`, `previous_application.csv`, `POS_CASH_balance.csv`, `credit_card_balance.csv`, `installments_payments.csv` for the richer joined features described below).
-2. Retrain **inside the container** — no local Python/pandas/LightGBM install needed. The image's `ENTRYPOINT` runs Streamlit, so override it to run the training script instead:
+1. Download the [Home Credit Default Risk dataset](https://www.kaggle.com/c/home-credit-default-risk/data) from Kaggle and place the CSVs in `data/` (`application_train.csv`, `application_test.csv`, `bureau.csv`, `bureau_balance.csv`, `previous_application.csv`, `POS_CASH_balance.csv`, `credit_card_balance.csv`, `installments_payments.csv`).
+2. Retrain **inside the container** — no local Python/pandas/LightGBM install needed:
    ```
    docker-compose run --rm --entrypoint python app -m src.ml.train
    ```
-   This overwrites `models/credit_risk_model.joblib` with a model trained on the real data, using the exact scikit-learn/LightGBM versions pinned in `requirements.txt` — training locally with a different local Python environment can silently produce a model pickled with a mismatched scikit-learn version (you'll see `InconsistentVersionWarning` in the container logs if this happens).
-3. Restart the app (`docker-compose restart`) or just reopen the Chatbot tab — `query_runner.py` detects `application_train.csv` is now present and automatically switches from the synthetic fallback to the real dataset, with no code changes needed. The synthetic-data banner disappears.
+   This overwrites `models/credit_risk_model.joblib` using the exact scikit-learn/LightGBM versions pinned in `requirements.txt`, and also runs the Milestone 2 data-validation suite and the Milestone 1 cost-sensitive threshold sweep as part of the same run.
+3. Regenerate the calibrator (Milestone 4) and decision-optimization artifact (Milestone 6) if you retrained:
+   ```
+   docker-compose run --rm --entrypoint python app -m src.ml.calibration
+   docker-compose run --rm --entrypoint python app -m src.ml.decision_optimization
+   ```
+4. Restart the app (`docker-compose restart`) — the Chatbot tab automatically switches from the synthetic fallback to the real dataset once `application_train.csv` is present, no code changes needed.
 
 ### Serving the chatbot from Postgres (optional, deployment only)
 
-On a deployed instance (Render, Streamlit Cloud, etc.) the real CSV is never present — it's correctly gitignored, per the "never commit the dataset" rule — so a deployed chatbot always falls back to synthetic data by default. As a third, fully optional path, `query_runner.py` can instead have DuckDB **attach a Postgres database live** and query it directly, with no CSV file, no download step at cold start, and the dataset never touching git at any point:
+On a deployed instance (Render, Streamlit Cloud, etc.) the real CSV is never present, so a deployed chatbot falls back to synthetic data by default. As a fully optional third path, `query_runner.py` can have DuckDB **attach a Postgres database live**:
 
-1. Provision a free Postgres instance (e.g. Render's free Postgres add-on) and note its connection string.
-2. From a machine that has the real Kaggle CSVs in `data/`, run the one-time load script locally (not in Docker, not automated — this is a manual, once-per-database step):
+1. Provision a free Postgres instance and note its connection string.
+2. From a machine with the real Kaggle CSVs in `data/`, run once:
    ```
    python scripts/load_dataset_to_postgres.py --connection-string "postgresql://user:pass@host:5432/dbname"
    ```
-   This reuses `build_joined_dataset()`, filters down to just the chatbot-facing columns (`query_runner.ALLOWED_COLUMNS`), and writes them into `pg_db.public.applicants` — no new Python dependency, DuckDB's `postgres` extension does the write.
-3. Set `POSTGRES_URL` as a secret on your deployment platform (not in `.env` committed anywhere) and redeploy.
+3. Set `POSTGRES_URL` as a secret on your deployment platform and redeploy.
 
-This is entirely optional — the app works correctly with `POSTGRES_URL` unset (real local CSV if present, else the synthetic fallback), and the real dataset never lives anywhere except Kaggle, your local `data/` folder, and the Postgres database you provision yourself. Any failure to connect (unset/wrong `POSTGRES_URL`, unreachable database, missing table) is caught and logged as a warning — the app always falls through cleanly to the synthetic fallback rather than crashing.
+This `POSTGRES_URL`/`applicants` table is **only** used by the chatbot — it is deliberately independent of the Milestone 8 data pipeline's own `DATABASE_URL`/`applicant_features` table (see § Data engineering). The two Postgres paths can point at the same physical database if convenient, but neither feature depends on the other. Any connection failure falls through cleanly to the synthetic fallback rather than crashing.
+
+## Data engineering (batch pipeline + cloud storage)
+
+```
+AWS S3 (optional)          data/*.csv
+  raw/ curated/ metadata/       │
+        │                  Batch Ingestion (src/pipeline/ingest.py)
+        │                       │
+        └───────────────► Data Validation (src/data/validation.py — REUSED, not a second framework)
+                                 │
+                        ETL / Feature Engineering (the SAME src.data.loader /
+                                 │                  src.data.preprocessor functions
+                                 │                  training and inference use)
+                        Curated Parquet (run_id-partitioned)
+                                 │
+                        PostgreSQL applicant_features table (optional, DATABASE_URL)
+```
+
+Run it: `python -m src.pipeline.pipeline --source local` (or `--source s3` with S3 configured; `--dry-run` verifies S3 configuration without touching any data; `--skip-postgres` skips the LOAD stage).
+
+**S3 zones**:
+- `raw/` — original CSVs staged verbatim per run, immutable.
+- `validated/` — not a data copy; the pass/fail validation outcome is recorded in the run manifest instead of duplicating the raw CSVs a second time just to represent a boolean.
+- `curated/` — the transformed applicant-level Parquet dataset, partitioned as `curated/applicant_features/run_id=<RUN_ID>/part-000.parquet`. Partitioned by run_id (not by any applicant attribute) — the dataset is small enough (a single ~70MB file) that there's no query-pruning benefit to further partitioning, but per-run isolation means a new run can never silently corrupt a previous run's output.
+- `features/` — reserved, intentionally unpopulated at this project's scale (`curated/` already is the applicant-level feature table; a separate export would only be justified by a genuine second, diverging consumer).
+- `metadata/` — one JSON run-manifest per pipeline run.
+
+**Why S3**: durable, versioned, immutable object storage for raw/curated snapshots, independent of the pipeline compute layer. **Why Parquet**: columnar, typed, compressed — the curated dataset is 71.7MB as Parquet vs. several times that as untyped CSV, and it round-trips exactly with the pandas/pyarrow stack the ML pipeline already depends on. **Why PostgreSQL as well**: different consumer — Parquet is for pipeline-to-pipeline handoff and archival, a relational table is what an analyst or BI tool actually wants to point SQL at. **Why both, not one replacing the other**: object storage without a queryable table means every consumer needs a pandas/pyarrow runtime; a database without object storage means no cheap, durable, versioned raw/curated archive independent of the database's own backup story.
+
+**Why Python orchestration, not Airflow**: this is a single deterministic batch job with no cross-job dependencies, backfills, or SLAs — `cron + python -m src.pipeline.pipeline` is the entire "orchestration platform" this workload needs; Airflow's scheduler/metadata-DB/web-UI would be overhead with no corresponding benefit at this scale.
+
+**Idempotency**: every output path is a deterministic function of `run_id` (curated Parquet, metadata JSON) — rerunning the same `run_id` overwrites, never duplicates. PostgreSQL uses `CREATE OR REPLACE TABLE` (full-refresh), independent of `run_id` — two loads never combine rows. This is a full-refresh design, not incremental upsert, because the source data is a single static Kaggle snapshot with no "what changed since last run" signal to track.
+
+**Retry**: S3 and Postgres I/O get a bounded retry (3 attempts, linear backoff) for transient failures. A missing `S3_BUCKET`, a genuine S3 404, or a data-validation `FAIL` are **not** retried — they're deterministic outcomes that retrying would only delay, not fix.
+
+**Real, measured pipeline results** (local mode, actual Home Credit dataset):
+```
+Input files: 8 (all expected tables present)
+Input rows:  58,489,893 (sum across all 8 raw files)
+Output (curated) rows: 307,511  ==  unique SK_ID_CURR in curated output: 307,511
+Engineered columns: 202 (203 on read-back — see note below)
+Validation status: WARNING (12 checks passed, 2 warnings, 0 failures)
+Curated Parquet size: 71.69 MB
+Runtime: ~78 seconds end-to-end
+```
+Note: reading the curated Parquet back via `pyarrow.parquet.read_table()` auto-injects a `run_id` column from the Hive-style partition path (`run_id=<RUN_ID>/...`) — a free lineage signal, not a schema mismatch.
+
+**AWS/PostgreSQL verification status — stated plainly**: no live AWS S3 or live PostgreSQL verification was performed during development, because no AWS credentials or reachable Postgres instance were available in that environment. S3 and Postgres LOAD functionality were verified using mocked clients (`tests/test_data_pipeline.py`); the local-mode pipeline was run for real, twice, against the actual 307,511-row dataset (numbers above). `--dry-run --source s3` was run for real and correctly raised a clean, actionable configuration error rather than a false success, since no `S3_BUCKET` is configured in that environment.
 
 ## Exploratory data analysis
 
@@ -144,138 +193,183 @@ This is entirely optional — the app works correctly with `POSTGRES_URL` unset 
 3. Lower education level → higher default rate
 4. Credit amount alone is non-monotonic; ratio to income matters more
 5. Younger applicants default more often than older applicants
-6. **Applicants with no bureau history default more often (10.12%) than those with bureau history (7.73%)** — a 2.39-percentage-point gap computed directly from `application_train.csv` joined against `bureau.csv`'s `SK_ID_CURR` values (`data/_eda_insight6_bureau_history.png`). This is the empirical basis for joining `bureau.csv` into the ML pipeline (see below) — not just an assumption from general domain knowledge about the dataset.
+6. **Applicants with no bureau history default more often (10.12%) than those with bureau history (7.73%)** — a 2.39-percentage-point gap computed directly from `application_train.csv` joined against `bureau.csv`. This is the empirical basis for the bureau/previous-application feature engineering below.
 
-## Model selection & imbalance handling
+## Feature engineering & data validation
 
-- **Model**: LightGBM gradient-boosted trees. Chosen over logistic regression for native handling of missing values, mixed numeric/categorical signal after one-hot encoding, and strong out-of-the-box performance on tabular data at this scale (~300k rows, 166 columns after joining) without heavy tuning. This used to be an unsupported assertion — no baseline was ever actually trained. It's now backed by a real number: run `python -m src.ml.train --baseline` to train a `LogisticRegression(class_weight="balanced")` (features scaled with `StandardScaler`, since unlike LightGBM, logistic regression needs scaled inputs to converge cleanly) on the identical validation split. See the comparison table below — **the honest finding is that the gap is real but smaller than the confident tone of "chosen over logistic regression" might imply**, especially on ROC-AUC alone.
-- **Imbalance**: `TARGET` is ~92% / 8% (see `notebooks/eda.ipynb`). Plain accuracy is meaningless here — a model that predicts "no default" for every applicant scores ~92%. We use LightGBM's `scale_pos_weight = negative_count / positive_count` as the primary strategy rather than SMOTE oversampling: with this many rows and a high-dimensional one-hot-encoded feature space, SMOTE's synthetic minority samples tend to land in unrealistic regions of feature space and mainly add training cost without improving ROC-AUC/PR-AUC over a correctly weighted loss. SMOTE remains available via `python -m src.ml.train --smote` for comparison. The logistic regression baseline above uses `class_weight="balanced"` for the same role.
-- **Why bureau/previous-application features were added (empirical, not assumed)**: EDA insight #6 above shows applicants with no bureau history default at nearly 1.3× the rate of those with bureau history (10.12% vs 7.73%) — a real, measured gap in the raw data, not a general assumption about credit datasets. That gap motivated joining `bureau.csv`, `bureau_balance.csv`, `previous_application.csv`, `POS_CASH_balance.csv`, `credit_card_balance.csv`, and `installments_payments.csv` into the training pipeline (see "Bureau & previous-application history" below), which measurably improved ROC-AUC from 0.7735 to 0.7817.
-- **Bureau & previous-application history**: beyond the single application-time snapshot, `src/data/preprocessor.py::build_aggregate_features` rolls up `bureau.csv` (+ `bureau_balance.csv`), `previous_application.csv`, `POS_CASH_balance.csv`, `credit_card_balance.csv`, and `installments_payments.csv` — one row per `SK_ID_CURR` — and left-joins them onto the applicant table (44 new columns, prefixed by source table: `BUREAU_*`, `PREV_APP_*`, `POS_*`, `CC_*`, `INSTALL_*`). This is the single biggest lever for ROC-AUC on this dataset, since an applicant's actual repayment history is a much stronger signal than a one-time snapshot. Counts default to 0 and ratios/amounts default to their column median for applicants with no history at all, distinguished from genuine zero-risk history via `HAS_BUREAU_HISTORY`/`HAS_PREV_APPLICATION` boolean flags. The exact same function is called by `train.py`, `predict.py`, and `shap_explainer.py` so inference-time features always match training-time features. All `DAYS_*`/`MONTHS_BALANCE` columns in these auxiliary tables are ≤ 0 relative to the current application (i.e. historical by construction), so this introduces no target leakage. Disable with `python -m src.ml.train --no-bureau-features` for an ablation comparison.
-- **Cross-validation (stability check)**: a single 80/20 split's ROC-AUC has no confidence interval on its own — it could be a lucky or unlucky split. `python -m src.ml.train --cv` runs 5-fold `StratifiedKFold` and reports mean ± std instead. See the evaluation section below; the std is tight enough that the single-split number isn't an outlier.
-- **Hyperparameter tuning**: `python -m src.ml.train --tune` runs a bounded `RandomizedSearchCV` (`n_iter=15, cv=3`, scored on PR-AUC given the imbalance) over `num_leaves`, `learning_rate`, `n_estimators`, `min_child_samples`. It found a `+0.0020` ROC-AUC improvement (`n_estimators=500, min_child_samples=100` vs. the current `n_estimators=300` default) — **smaller than the 5-fold CV's own fold-to-fold standard deviation (±0.0039)**, i.e. within noise. Current defaults (`n_estimators=300, learning_rate=0.05, num_leaves=31`) were kept rather than chasing a difference smaller than the model's own run-to-run variance. This is opt-in (`--tune`) and not part of the default training run, since a 15×3 search takes several minutes.
-- **Monotonic constraints**: `AMT_INCOME_TOTAL` and `EXT_SOURCE_1`/`EXT_SOURCE_2`/`EXT_SOURCE_3` get a `monotone_constraints=-1` in the default LightGBM training run — higher income or a higher external credit-bureau score can never *increase* the model's predicted risk, regardless of what a tree happens to learn locally from noise in some region of feature space. This is standard, expected practice in credit risk scoring specifically: a regulator or an internal fair-lending review can reasonably ask "does raising this applicant's income ever make them look riskier to the model?", and for these four features the honest, defensible answer needs to be no. The `EXT_SOURCE_*` direction (-1 = higher is safer) was confirmed against this codebase's own derived rules before applying it (`src/rules/rule_derivation.py` output shows `EXT_SOURCE_3 > 0.55 → Low Risk`, `≤ 0.55 → High Risk`, i.e. higher is consistently safer). Deliberately **not** applied to every feature — e.g. `CNT_CHILDREN` and `DAYS_EMPLOYED` have plausible non-monotonic real-world relationships with default risk (very long tenure at a failing employer, very high dependents load at high income, etc.) and forcing a direction on them would be scientifically dishonest, not more rigorous. Measured cost of applying the four constraints: **essentially none** — see the before/after table below.
+`src/data/preprocessor.py` builds credit-behavior features from the six auxiliary Home Credit tables (`build_bureau_features`, `build_previous_application_features`, `build_pos_cash_features`, `build_credit_card_features`, `build_installment_features`), joined via `build_aggregate_features()`, plus ratio features (`engineer_features()`) — the single shared code path used by training, inference, SHAP, rule derivation, and the data pipeline, so features can never drift between contexts.
 
-## Evaluation metrics & results
+**80 registered engineered features** (`src/data/feature_registry.py`) — each with a recorded source table, business meaning, actionable/leakage classification. Raw application-table passthrough columns (e.g. `AMT_INCOME_TOTAL`, `EXT_SOURCE_1/2/3`) are intentionally not registered — the registry covers only *derived* features. The joined dataset has **194 columns** at this stage (up from 166 before the Milestone 1 feature-engineering upgrade); after one-hot encoding, the model sees **319 encoded features**.
 
-**PR-AUC is the primary metric for this problem**, not ROC-AUC — with ~92%/8% class imbalance, ROC-AUC can look deceptively strong (a model can rank well overall while still doing poorly on the minority default class that actually matters for a credit-risk screening tool), while PR-AUC is computed entirely from precision and recall on the positive (default) class and better reflects real screening performance. Both numbers are reported throughout; PR-AUC is just presented first.
+**Automated data validation** (`src/data/validation.py`) checks TARGET leakage, applicant-ID uniqueness, row-count preservation across joins, infinite/constant/high-cardinality features, feature-registry consistency, non-negative business fields, and a measured (not assumed) form of train/validation statistical contamination — reused verbatim by both `src.ml.train` and the Milestone 8 data pipeline, not reimplemented. **Scope note, stated honestly**: this catches known, mechanically-detectable failure modes; it does not and cannot guarantee the complete absence of semantic data leakage, which requires domain review no automated check can fully replace.
 
-**Model comparison** (same stratified 80/20 validation split, `random_state=42`):
+## Model development & selection
 
-| Model | PR-AUC | ROC-AUC |
-|---|---|---|
-| **LightGBM** (deployed, with monotonic constraints) | **0.2760** | **0.7817** |
-| Logistic Regression (baseline, `--baseline`) | 0.2445 | 0.7648 |
+Three models were compared under **identical** data, split, preprocessing, target, and evaluation (`src/ml/model_comparison.py`), not a "LightGBM was obviously right" assumption:
 
-LightGBM wins on both metrics, more clearly so on PR-AUC (+0.0315) than on ROC-AUC alone (+0.0169) — a properly-scaled logistic regression is a closer baseline than the "chosen over logistic regression" framing might suggest, and PR-AUC (the metric that matters most given the imbalance) is where the gap is more meaningful. Report this honestly rather than only the flattering framing.
+| Model | ROC-AUC | PR-AUC | Precision @ 0.5 | Recall @ 0.5 | F1 @ 0.5 |
+|---|---:|---:|---:|---:|---:|
+| Logistic Regression | 0.7711 | 0.2557 | 0.1747 | 0.6983 | 0.2795 |
+| XGBoost | 0.7823 | 0.2800 | 0.1940 | 0.6693 | 0.3008 |
+| **LightGBM (deployed)** | **0.7854** | **0.2851** | 0.1881 | 0.6971 | 0.2963 |
 
-**5-fold cross-validation (stability check)**, `python -m src.ml.train --cv`, application+bureau features, LightGBM defaults, no monotonic constraints applied in this path:
+**5-fold cross-validation** (stability check): LightGBM ROC-AUC 0.7827 ± 0.0032, PR-AUC 0.2746 ± 0.0043.
 
-| Metric | Mean ± std across 5 folds |
-|---|---|
-| PR-AUC | 0.2679 ± 0.0060 |
-| ROC-AUC | 0.7790 ± 0.0039 |
+LightGBM leads on both PR-AUC and ROC-AUC in both the single-split and CV evaluation — but the margin over XGBoost is modest (CV PR-AUC gap of 0.0028, smaller than either model's own CV standard deviation) and should not be oversold as a decisive win. XGBoost would have been a defensible alternative choice. LightGBM was selected primarily because it never underperforms on the metrics that matter most, and its monotonic constraints (`AMT_INCOME_TOTAL`, `EXT_SOURCE_1/2/3` — verified to cost effectively zero measured performance) and existing SHAP TreeExplainer integration give it an interpretability/fair-lending edge XGBoost would need equivalent work to match.
 
-The single 80/20 split's numbers (below) fall within about one fold-to-fold standard deviation of these means — the split wasn't a lucky or unlucky draw.
+**Imbalance handling**: `TARGET` is ~92%/8%. LightGBM's `scale_pos_weight = negative_count / positive_count` is the primary strategy (SMOTE available via `--smote` for comparison, but not used by default — at this scale and dimensionality it mainly adds training cost without improving PR-AUC/ROC-AUC over a correctly weighted loss).
 
-**Before/after monotonic constraints** (application + bureau/previous-app features, same 80/20 split), before vs. after adding the bureau/previous-app aggregates, then before vs. after adding monotonic constraints on top:
+**Monotonic constraints**: `AMT_INCOME_TOTAL` and `EXT_SOURCE_1/2/3` get `monotone_constraints=-1` — higher income or a higher external credit-bureau score can never *increase* predicted risk, regardless of local noise a tree might otherwise learn. Deliberately not applied to every feature (e.g. `CNT_CHILDREN`, `DAYS_EMPLOYED` have plausible non-monotonic real-world relationships with risk).
 
-| Metric | Application-level only | + Bureau & previous-app history | + Monotonic constraints (deployed) |
-|---|---|---|---|
-| PR-AUC | 0.2667 | 0.2761 | **0.2760** (−0.0001) |
-| ROC-AUC | 0.7735 | 0.7814 | **0.7817** (+0.0003) |
-| Precision @ 0.5 | 0.178 | 0.184 | 0.1845 |
-| Recall @ 0.5 | 0.684 | 0.695 | 0.6959 |
-| F1 @ 0.5 | 0.283 | 0.291 | 0.2916 |
+## Probability calibration
 
-Monotonic constraints typically cost a small amount of raw performance in exchange for interpretability/regulatory defensibility — here the cost is effectively zero (within noise, PR-AUC moved by -0.0001 and ROC-AUC by +0.0003), so this is a case where the fair-lending defensibility came free rather than requiring a real tradeoff. That won't always be true on a different dataset or feature set; it should still be checked, not assumed, each time constraints are added or changed. Run `python -m src.ml.evaluate` after training to print the full top-20 feature-importance list for the current model.
+**Raw LightGBM probabilities are severely overconfident** — a direct, measured consequence of `scale_pos_weight≈11.39` reshaping the probability distribution for ranking at the cost of reliability. Verified empirically: at every decile, raw mean predicted probability sat well above the observed default frequency (e.g. top decile: 0.78 predicted vs. 0.30 observed).
 
-Confusion matrix @ threshold 0.5, current deployed model (rows = actual, cols = predicted):
+**Methodology (leakage-free)**: 5-fold out-of-fold raw probabilities on the *training* population (never the held-out validation split) — each fold's OOF prediction comes from a model that never saw that row — then sigmoid and isotonic calibrators are fit on those OOF predictions. Evaluation happens entirely on the validation split, untouched by calibration fitting.
 
+| Model Output | Brier Score | Log Loss | ROC-AUC | PR-AUC |
+|---|---:|---:|---:|---:|
+| Raw LightGBM | 0.17679 | 0.52595 | 0.7854 | 0.2851 |
+| **Sigmoid (selected)** | 0.06581 | 0.23732 | 0.7854 | 0.2851 |
+| Isotonic | 0.06577 | 0.23711 | 0.7852 | 0.2781 |
+
+Sigmoid and isotonic are a **statistical tie** on Brier score (a 0.00004 difference — noise, not signal). The tie was broken on ranking preservation: isotonic's step-function measurably degraded PR-AUC (−0.0070, a real, non-noise drop caused by ties among distinct raw probabilities collapsing onto the same isotonic output), while sigmoid — a strictly monotonic transform — preserved PR-AUC/ROC-AUC exactly. Sigmoid was **not** picked by default "because it's simpler"; isotonic was the code's first automatic choice by raw Brier score, caught and corrected by inspecting the ranking-metric side effect.
+
+`src/ml/predict.py::predict_applicant()` exposes both `raw_probability` and `calibrated_probability` explicitly (never silently substituting one for the other), plus `calibration_method` reporting which calibrator (or `"none"` if unavailable) produced the calibrated value.
+
+## Risk scoring
+
+Calibrated PD (not raw probability) feeds risk scoring:
 ```
-              Pred: No Default   Pred: Default
-Actual: No Default   41,265          15,273
-Actual: Default       1,510           3,455
-```
-
-At the default 0.5 threshold the model favors recall (catching ~70% of actual defaulters) at the cost of precision — appropriate for a screening tool where missing a defaulter is costlier than a false flag that goes to manual review. The threshold is adjustable per business risk appetite via `RISK_THRESHOLD_LOW`/`RISK_THRESHOLD_MEDIUM` in `.env`, which control the Low/Medium/High risk-band cutoffs used in `src/ml/predict.py`.
-
-## Prompt engineering & token optimization
-
-- **Provider**: [Groq](https://groq.com) free tier (`openai/gpt-oss-20b` by default) is tried first for its fast inference and generous free rate limits, ideal for an interactive chat UI. [Google Gemini](https://ai.google.dev) free tier (`gemini-flash-latest`) is the automatic fallback if `GROQ_API_KEY` is unset or the Groq call fails — see `src/talk_to_data/nl_to_sql.py::call_llm`. Both providers rotate/rename their free-tier models fairly often; if either fails with a "model not found" or "no longer available" error, check `GROQ_MODEL`/`GEMINI_MODEL` in `.env` against the provider's current model list.
-- **Token optimization**: the system prompt (`src/talk_to_data/prompt_templates.py`) sends only a compact column-level schema description (a curated ~20 columns, one line each — including a handful of the new bureau/previous-application aggregates) rather than sample rows or the full 166-column joined dataset — this keeps the prompt short and cheap while still giving the model everything needed to write correct SQL. Conversation memory is capped to the last 3 turns to bound context growth on long chat sessions. `SYSTEM_PROMPT_V1` also includes 4 few-shot question→SQL examples (`FEW_SHOT_EXAMPLES`, matching the "Example queries" section above), adding roughly ~190 tokens to every call — a deliberate small, fixed cost traded for meaningfully more consistent SQL on ambiguous phrasing (e.g. "risky applicants," "compare genders") that the schema and rules alone don't fully disambiguate.
-- **Guardrails against hallucination**: `src/talk_to_data/query_runner.py` parses the generated SQL with `sqlparse`, rejects anything that isn't a single `SELECT`, rejects any referenced table other than `applicants`, and rejects any referenced column not in the known schema. If validation fails, `nl_to_sql.py` retries once with the error fed back to the LLM; if the retry also fails, it returns a graceful "couldn't answer" message instead of ever executing unvalidated SQL. A `LIMIT` is enforced on every query (`MAX_QUERY_ROWS` in `.env`, default 200).
-
-### Example queries
-
-Five representative query patterns the chatbot handles end-to-end (natural language → validated SQL → plain-language answer). Exact figures depend on which data source is loaded — the real Kaggle dataset if present, otherwise the committed synthetic fallback (`data/sample_applicants.csv`) — see "Setup & run" above.
-
-1. **Simple aggregate** — *"What is the average income of applicants who defaulted?"*
-   ```sql
-   SELECT AVG(AMT_INCOME_TOTAL) AS avg_income FROM applicants WHERE TARGET = 1
-   ```
-   → *"Applicants who defaulted had an average annual income of approximately ₹X, compared to the overall applicant base."*
-
-2. **Group-by rate comparison** — *"What's the default rate by education level?"*
-   ```sql
-   SELECT NAME_EDUCATION_TYPE, ROUND(AVG(TARGET) * 100, 2) AS default_rate_pct
-   FROM applicants
-   GROUP BY NAME_EDUCATION_TYPE
-   ORDER BY default_rate_pct DESC
-   ```
-   → *"Applicants with only secondary education default at the highest rate, while those with an academic degree default least often — consistent with EDA insight #3."*
-
-3. **Filter + count** — *"How many applicants have more than 2 children and a credit amount over 1,000,000?"*
-   ```sql
-   SELECT COUNT(*) AS applicant_count
-   FROM applicants
-   WHERE CNT_CHILDREN > 2 AND AMT_CREDIT > 1000000
-   ```
-   → *"There are N applicants matching both conditions."*
-
-4. **Boolean-flag / engineered-feature query** — *"Compare the default rate for applicants with and without bureau history."*
-   ```sql
-   SELECT HAS_BUREAU_HISTORY, ROUND(AVG(TARGET) * 100, 2) AS default_rate_pct
-   FROM applicants
-   GROUP BY HAS_BUREAU_HISTORY
-   ```
-   → *"Applicants with no bureau history default more often than those with a bureau history — the same directional gap documented in EDA insight #6."*
-
-5. **Conversational follow-up** (tests 3-turn memory) — Turn 1: *"What's the average credit amount by gender?"* Turn 2 (follow-up, no repeated context): *"And just for those with children?"*
-   ```sql
-   -- Turn 2 SQL, resolved using conversation history from Turn 1
-   SELECT CODE_GENDER, AVG(AMT_CREDIT) AS avg_credit
-   FROM applicants
-   WHERE CNT_CHILDREN > 0
-   GROUP BY CODE_GENDER
-   ```
-   → *"Demonstrates that `nl_to_sql.py`'s conversation history (last 3 turns) lets the model correctly resolve "those" back to applicants, without the user having to restate the full question."*
-
-## Rule derivation logic & sample output
-
-`src/rules/rule_derivation.py` trains a shallow (`max_depth=4`) `DecisionTreeClassifier` **surrogate** on the trained LightGBM model's own predictions (not the ground-truth `TARGET`) — this approximates the model's decision boundary in a form readable without any ML background, rather than trying to summarize an ensemble of hundreds of trees directly.
-
-Sample derived rules:
-
-```
-IF EXT_SOURCE_3 <= 0.55 AND EXT_SOURCE_2 <= 0.52 AND EXT_SOURCE_1 <= 0.62 AND EXT_SOURCE_2 <= 0.35
-   THEN predicted outcome = High Risk (likely default)
-
-IF EXT_SOURCE_3 > 0.55 AND EXT_SOURCE_2 <= 0.42 AND EXT_SOURCE_2 > 0.15 AND DAYS_EMPLOYED <= -1624.50
-   THEN predicted outcome = Low Risk (likely repay)
-
-IF EXT_SOURCE_3 > 0.55 AND EXT_SOURCE_2 > 0.42 AND EXT_SOURCE_1 <= 0.28 AND ANNUITY_INCOME_RATIO > 0.15
-   THEN predicted outcome = High Risk (likely default)
+risk_score = round(clip(calibrated_pd, 0, 1) × 1000)   — bounded 0-1000, deliberately not
+                                                           a 300-850 scale, to avoid resembling
+                                                           FICO/VantageScore
 ```
 
-(`EXT_SOURCE_1/2/3` are the Home Credit dataset's normalized external credit-bureau scores — consistently the strongest predictors in this dataset, which the surrogate correctly surfaces as the top splits.)
+**Risk bands** — a hybrid of fixed thresholds informed by real decile analysis of calibrated PD on the validation population (overall observed default rate 8.07%):
 
-## Known limitations & future improvements
+| Band | Calibrated PD range | Share of population | Observed default rate |
+|---|---|---:|---:|
+| Low | < 0.05 | 49.2% | 2.4% |
+| Moderate | 0.05 – 0.10 | 23.6% | 6.3% |
+| High | 0.10 – 0.20 | 17.7% | 14.1% |
+| Very High | ≥ 0.20 | 9.6% | 30.6% |
 
-- The surrogate-tree rules approximate the model's boundary but are not the model itself — at rule boundaries the tree's decision can disagree with the underlying LightGBM prediction; treat rules as an explanatory aid, not a replacement scoring engine.
-- `EXT_SOURCE_*` and `DAYS_BIRTH` (age) are top predictors; age-correlated features should be reviewed for fair-lending / disparate-impact compliance before any production use.
-- The chatbot's SQL validator is a token-scan safeguard (via `sqlparse`), not a full SQL parser — it covers the required query patterns robustly but is not guaranteed to catch every conceivable malformed statement.
-- All six auxiliary Home Credit tables are now joined (`bureau`, `bureau_balance`, `previous_application`, `POS_CASH_balance`, `credit_card_balance`, `installments_payments`), but only as simple per-applicant rollups (count/sum/mean/max). Recency-weighted aggregates (e.g. "delinquency in the last 6 months" vs. all-time) and second-order features (trend of utilization over time, not just its mean) are the natural next layer and would likely close more of the gap to heavily-tuned public Kaggle solutions.
-- The bureau/previous-application lift measured here (+0.008 ROC-AUC) is real but modest; before relying on it for a materially different risk appetite, re-validate on a held-out time-based split rather than a random split, since credit data has strong temporal structure that a random 80/20 split doesn't fully test for.
-- A bounded hyperparameter search has now been run (`python -m src.ml.train --tune`, 15-iteration `RandomizedSearchCV`) — it found only a +0.0020 ROC-AUC improvement, smaller than the model's own 5-fold cross-validation noise (±0.0039), so the original defaults were kept rather than chasing that difference. A wider or Bayesian search (e.g. `optuna`) over more iterations/a larger parameter space might still find a real improvement past what this bounded search covered.
-- Monotonic constraints are applied to only 4 of 291 trained features (`AMT_INCOME_TOTAL`, `EXT_SOURCE_1/2/3`) — a deliberately conservative starting set. Other features with a plausible case for constraining (e.g. `CREDIT_TERM`, `ANNUITY_INCOME_RATIO`) were left unconstrained pending a closer domain review, rather than extending the constraint set speculatively.
+Monotonicity confirmed directly (mean PD and observed default rate both strictly increase across bands). **These are project-defined categories for this project, evaluated on one validation snapshot — not official banking, FICO, or credit-bureau risk grades.**
+
+**A large, honestly-reported shift from the old (pre-calibration) bands**: the previous system used fixed raw-probability thresholds (`RISK_THRESHOLD_LOW=0.10`, `RISK_THRESHOLD_MEDIUM=0.30`, three bands: Low/Medium/High). Because raw probabilities were severely inflated population-wide, 90.6% of applicants previously labeled "Medium" or part of "High" are now correctly recognized as "Low" risk under calibrated PD. Ranking (ROC-AUC/PR-AUC) is unchanged by calibration — this is a scale correction, not a change in the model's underlying risk assessment.
+
+## Cost-sensitive decision optimization
+
+```
+Expected Cost = FP_COST × false_positives + FN_COST × false_negatives
+```
+where "positive" = predicted high-risk/default (calibrated PD ≥ threshold); FP = a good applicant wrongly declined, FN = a bad applicant wrongly approved.
+
+Optimized on **calibrated PD** (not raw probability, unlike the legacy Milestone-1 sweep — both now coexist, see below), over a configurable threshold sweep (default 0.01–0.99):
+
+| Scenario (illustrative only — not real bank policy) | FP/FN Cost | Optimal threshold | Expected cost | Precision | Recall | Acceptance rate |
+|---|---|---:|---:|---:|---:|---:|
+| Balanced | 1 / 1 | 0.500 | 4,911 | 0.6164 | 0.0288 | 99.6% |
+| **Conservative (baseline)** | 1 / 5 | **0.170** | 19,622 | 0.2756 | 0.4419 | 87.1% |
+| Very Conservative | 1 / 10 | 0.100 | 29,743 | 0.1988 | 0.6717 | 72.7% |
+
+**Old (raw scale, threshold 0.67) vs. new (calibrated scale, threshold 0.17) at the same FP=1/FN=5 cost assumption**: the two numeric thresholds are **not directly comparable** — they're optimized on different probability scales, and "the threshold improved from 0.67 to 0.17" would be a meaningless claim. What *is* comparable is the resulting expected cost under the same cost ratio: old = 19,616, new = 19,622 — a **statistical tie** (0.03% difference). This makes sense: sigmoid calibration is a strictly monotonic transform, so cost-optimal threshold selection (which depends only on rank order) converges on nearly the same underlying applicant partition regardless of scale — the huge numeric difference between 0.67 and 0.17 reflects the calibration curve's shape, not a change in which applicants get flagged.
+
+`predict_applicant()` now exposes, alongside the legacy raw-probability `cost_optimal_decision`/`optimal_threshold` (kept unchanged for backward compatibility): `decision`, `decision_probability_source` (explicitly `"calibrated"`, `"raw"`, or `"unavailable"` — never implicit), `decision_threshold`, `decision_scenario`, `fp_cost`/`fn_cost`. Both decision surfaces coexist; neither silently replaces the other.
+
+## SHAP explainability
+
+`shap.TreeExplainer` with its **default** `model_output="raw"` — not reconfigured to explain probability. Verified empirically against a real applicant: `base_value + Σ SHAP contributions == model.predict(X, raw_score=True)` (the raw margin) to full floating-point precision, and `sigmoid(that sum) == pipeline.predict_proba()` exactly.
+
+**SHAP explains the model's raw margin — it does not directly explain calibrated PD, the risk band, or the Approve/Decline decision**, which are separate downstream transformations. `shap_explanation_target = "raw_model_margin"` is set explicitly on every structured explanation so this is never implied otherwise.
+
+`src/explainability/shap_explainer.py::explain_applicant_full()` returns an `ApplicantExplanation` with the raw/calibrated probability, risk band, decision, and SHAP contributions split into risk-increasing (SHAP > 0) vs. risk-reducing (SHAP < 0) drivers, ranked by `|SHAP value|`. Each contribution is mapped to a business-readable description via the feature registry (falling back to the plain feature name — never a fabricated interpretation — if unregistered). One-hot categorical features are split back into `(source_feature, category)` pairs (e.g. `NAME_CONTRACT_TYPE_Cash loans` → source `NAME_CONTRACT_TYPE`, category `Cash loans`) — a real naming bug (generic `x0_`/`x1_`-style sklearn defaults) was found and fixed to make this possible.
+
+Real example (SK_ID_CURR=100002): raw probability 0.8356, calibrated PD 0.3518, risk band Very High, decision Decline. Top risk-increasing drivers: `EXT_SOURCE_3`, `EXT_SOURCE_1`, `EXT_SOURCE_2`. Top risk-reducing: `DAYS_BIRTH`, `INSTALL_LATE_RATIO`, `POS_CNT_INSTALMENT_FUTURE_MEAN`.
+
+## Fairness audit
+
+`src/fairness/audit.py` computes demographic parity difference and equal opportunity difference across `CODE_GENDER` and `NAME_EDUCATION_TYPE`, on the same validation split, using the deployed model's raw probability against `RISK_THRESHOLD_MEDIUM` (an intentionally independent system from the calibrated risk bands above — see its own module docstring).
+
+**Real findings, not smoothed over**: `NAME_EDUCATION_TYPE` shows a demographic parity difference of **0.2865** and equal opportunity difference of **0.1992** (42.5%–71.6% predicted-high-risk range across education levels); `CODE_GENDER` similarly shows a substantial disparity. Both are well past the 5-point flag threshold — **this model, as-is, would not pass a real fair-lending review.** No mitigation (post-hoc threshold adjustment, fairness-constrained training, proxy-feature removal) has been implemented — this audit's job is to **surface** disparity accurately, not resolve it. Do not interpret these metrics as proof of legal compliance or its absence; that determination requires domain/legal expertise this audit does not provide.
+
+## Model monitoring
+
+`src/monitoring/drift_report.py` uses Evidently to compare a saved training-time reference snapshot against a current batch, covering **data drift** (feature distributions) and **target drift** (TARGET distribution) — the two forms of drift currently implemented. Prediction drift and live performance monitoring (which need labeled outcomes over time) are **not** implemented — this is honestly a batch/on-demand data-quality check, not a full enterprise observability platform. A real bug (conflating p-value and distance-based drift-test thresholds) was found and fixed during development — see `src/monitoring/drift_report.py`'s docstring.
+
+## Model card
+
+`scripts/generate_model_card.py` produces `reports/model_card.pdf` — intended use, out-of-scope uses, training data, performance metrics, per-group fairness metrics, monotonic constraints, and known limitations, every number computed fresh from the current model artifact.
+
+## REST API
+
+`api.py` exposes `GET /health` and `POST /predict` on port 8000, alongside Streamlit (port 8501) in the same container via `supervisord`. It is a thin wrapper around `src.ml.predict.predict_applicant()` and the SHAP explainer — the same inference path the UI uses.
+
+**Documented accurately, not aspirationally**: `PredictResponse.risk_score` returns the **raw** LightGBM probability (0–1) — not the calibrated probability, and not the separate 0–1000 integer risk score `src.ml.risk_scoring` computes internally. This naming collision is a known, deliberate backward-compatibility tradeoff, not an oversight — documented in the field's own description. `risk_band` reflects the current Low/Moderate/High/Very High calibrated-PD bands. The API does **not** currently expose `calibrated_probability`, the Milestone 6 cost-sensitive `decision`, or the Milestone 5 integer `risk_score` — only what's shown above, plus top-3 SHAP drivers.
+
+```bash
+curl -X POST http://localhost:8000/predict -H "Content-Type: application/json" -d '{
+  "AMT_INCOME_TOTAL": 202500.0, "AMT_CREDIT": 406597.5, "AMT_ANNUITY": 24700.5,
+  "CODE_GENDER": "M", "NAME_EDUCATION_TYPE": "Secondary / secondary special",
+  "NAME_CONTRACT_TYPE": "Cash loans", "DAYS_BIRTH": -9461, "DAYS_EMPLOYED": -637
+}'
+```
+Interactive OpenAPI docs at `http://localhost:8000/docs`.
+
+## Streamlit application
+
+10 tabs, reflecting what's actually implemented (not an aspirational list):
+
+1. **EDA** — dataset summary, class balance, the 6 business insights.
+2. **Risk Prediction** — score one applicant: raw + calibrated probability, risk band, the new calibrated-PD business decision, the legacy raw-probability cost-optimal decision, and an interactive threshold-vs-cost curve.
+3. **Model Evaluation** — live ROC/PR curves, confusion matrix, and the **Download Model Card** button.
+4. **Explainability** — per-applicant SHAP (plain-language) plus a global SHAP summary/beeswarm plot.
+5. **Business Rules** — surrogate decision-tree rules.
+6. **Fairness Audit** — per-group metrics, demographic parity/equal opportunity, a bar chart, with an explicit disclaimer that disparity metrics are not proof of legal compliance.
+7. **Monitoring** — live data/target drift vs. a saved reference snapshot.
+8. **Chatbot** — natural-language-to-SQL portfolio analytics.
+
+(Tabs are grouped here by function; see `app.py`'s sidebar for the exact current list and order.)
+
+## Prompt engineering & chatbot
+
+- **Provider**: [Groq](https://groq.com) free tier tried first, [Gemini](https://ai.google.dev) free tier as automatic fallback.
+- **Guardrails**: `sqlparse`-based validation rejects anything but a single `SELECT` against the known `applicants` table/columns; one retry on validation failure; a graceful "couldn't answer" message if both attempts fail; `LIMIT` enforced on every query.
+- Renamed conceptually to **natural-language risk analytics** — it answers portfolio questions ("default rate by education level," "high-risk applicants with no bureau history"), not general chit-chat.
+
+## Testing
+
+```
+pytest suite: 145 tests across feature engineering, data validation, model
+comparison, calibration, risk scoring, decision optimization, SHAP
+explainability, and the data pipeline — 0 failures on the last full run.
+```
+Run: `docker-compose run --rm --entrypoint python app -m pytest tests/ -v`
+
+## Configuration
+
+All configuration lives in `.env` (gitignored; `.env.example` has placeholders only — never commit real credentials). Groups:
+- **LLM** (chatbot): `GROQ_API_KEY`, `GEMINI_API_KEY` and model names.
+- **Risk/decision thresholds**: `RISK_THRESHOLD_LOW`/`MEDIUM` (legacy raw-probability bands, still used by the fairness audit and legacy `cost_optimal_decision`), `FP_COST`/`FN_COST` (used by both the legacy Milestone 1 sweep and the Milestone 6 calibrated-PD optimizer).
+- **Chatbot Postgres** (optional): `POSTGRES_URL`.
+- **Data pipeline / cloud** (optional, Milestone 8): `DATA_SOURCE`, `AWS_REGION`, `S3_BUCKET`, `S3_PREFIX`, `DATABASE_URL` — a deliberately separate setting from `POSTGRES_URL` above; the two Postgres integrations don't depend on each other.
+- **Paths**: `DATA_DIR`, `MODELS_DIR`.
+
+AWS credentials themselves are never read from `.env` — they come entirely from boto3's standard credential chain (environment variables, `~/.aws/credentials`, an IAM role).
+
+## Docker
+
+`docker-compose up --build` runs one container with Streamlit (8501) and FastAPI (8000) via `supervisord`. Volume mounts: `data/`, `models/`, `reports/`, `curated_data/`, `metadata/` (the last two added in Milestone 8 — without them, data-pipeline output only existed inside the container and was lost on rebuild, a real bug found and fixed). The app starts and serves correctly with zero cloud configuration present.
+
+## Known limitations
+
+- Risk bands and the illustrative cost scenarios are **project-defined, not official banking/FICO/regulatory categories** — stated throughout, not just here.
+- Fairness disparities are measured and surfaced, not mitigated — this model, unmodified, would not pass a real fair-lending review.
+- No temporal validation anywhere in the platform — every split is random 80/20; credit data has real temporal structure a random split doesn't test.
+- The SQL chatbot's validator is a token-scan safeguard, not a full parser.
+- Monitoring covers data/target drift only — no prediction drift, no live performance monitoring (both need labeled outcomes over time this project's static dataset can't provide).
+- No live AWS S3 or PostgreSQL verification was performed during development (no credentials/reachable database available) — S3 and the pipeline's Postgres load were verified via mocked tests; the pipeline's local mode was verified against the real dataset.
+- The data pipeline's PostgreSQL table (`applicant_features`) is analytical storage sized for this project, not a substitute for an enterprise data warehouse.
+- Calibration, risk bands, and the cost-optimal threshold were all computed once against the current model/dataset snapshot; none of them re-validate themselves automatically after a retrain — rerunning `src.ml.calibration`/`src.ml.risk_scoring`/`src.ml.decision_optimization` after any retrain is a manual step.
+- The legacy raw-probability `cost_optimal_decision`/`optimal_threshold` fields (Milestone 1) remain in `predict_applicant()`'s output for backward compatibility, alongside the new calibrated-PD decision fields (Milestone 6) — two coexisting, uncoordinated decision surfaces, by design, not an oversight.

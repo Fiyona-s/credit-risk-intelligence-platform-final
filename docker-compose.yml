@@ -2,10 +2,18 @@ services:
   app:
     build: .
     ports:
-      - "8501:8501"
+      - "8501:8501"  # Streamlit UI
+      - "8000:8000"  # FastAPI REST API (/predict, /health, /docs)
     volumes:
       - ./data:/app/data
       - ./models:/app/models
+      - ./reports:/app/reports
+      # Milestone 8 data pipeline local outputs (src/pipeline/pipeline.py) —
+      # without these mounts, curated Parquet/metadata only exist inside the
+      # container and are lost on rebuild/removal (the same class of bug
+      # previously found and fixed for ./reports in an earlier milestone).
+      - ./curated_data:/app/curated_data
+      - ./metadata:/app/metadata
     env_file:
       - .env
     restart: unless-stopped
