@@ -26,13 +26,13 @@ FastAPI REST endpoint · Streamlit multi-tab UI · natural-language-to-SQL chatb
 
 ```mermaid
 flowchart TD
-    S3[AWS S3<br/>raw / curated / metadata zones<br/>optional — DATA_SOURCE=s3]
+    S3[AWS S3<br/>raw / curated / metadata zones<br/>DATA_SOURCE=s3]
     RAW[data/*.csv<br/>Home Credit application + 6 auxiliary tables]
     INGEST[Batch Ingestion<br/>src/pipeline/ingest.py]
     VALIDATE[Data Validation<br/>src/data/validation.py — reused everywhere]
     ETL[ETL / Feature Engineering<br/>src/data/loader.py + src/data/preprocessor.py<br/>SAME functions used by training, inference, and the pipeline]
     CURATED[Curated Parquet<br/>curated_data/applicant_features/run_id=.../part-000.parquet]
-    PG[(PostgreSQL<br/>applicant_features table — optional, DATABASE_URL)]
+    PG[(PostgreSQL<br/>applicant_features table — DATABASE_URL)]
     LGBM[LightGBM<br/>scale_pos_weight + monotonic constraints]
     RAWP[Raw Probability]
     SHAP[SHAP Explanation<br/>raw model margin]
@@ -43,7 +43,7 @@ flowchart TD
     DECISION[Approve / Decline]
     APIUI[FastAPI + Streamlit]
 
-    S3 -.optional.-> RAW
+    S3 -.DATA_SOURCE=s3.-> RAW
     RAW --> INGEST --> VALIDATE --> ETL --> CURATED --> PG
     ETL --> LGBM
     LGBM --> RAWP
@@ -139,7 +139,7 @@ This `POSTGRES_URL`/`applicants` table is **only** used by the chatbot — it is
 ## Data engineering (batch pipeline + cloud storage)
 
 ```
-AWS S3 (optional)          data/*.csv
+AWS S3                     data/*.csv
   raw/ curated/ metadata/       │
         │                  Batch Ingestion (src/pipeline/ingest.py)
         │                       │
@@ -150,7 +150,7 @@ AWS S3 (optional)          data/*.csv
                                  │                  training and inference use)
                         Curated Parquet (run_id-partitioned)
                                  │
-                        PostgreSQL applicant_features table (optional, DATABASE_URL)
+                        PostgreSQL applicant_features table (DATABASE_URL)
 ```
 
 Run it: `python -m src.pipeline.pipeline --source local` (or `--source s3` with S3 configured; `--dry-run` verifies S3 configuration without touching any data; `--skip-postgres` skips the LOAD stage).
